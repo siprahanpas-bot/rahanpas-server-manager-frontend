@@ -1,34 +1,52 @@
-# Rahanpas Server Manager - Frontend
+Rahanpas Server Manager — Frontend
+Antarmuka web untuk Rahanpas Server Manager yang dibangun menggunakan Nuxt 3 (SSR & Server API Proxy) dan dijalankan di dalam Docker.
 
-Frontend interface untuk Rahanpas Server Manager yang dibangun menggunakan **Nuxt 3** dan didingkus menggunakan Docker. Mendukung pengaturan port secara fleksibel melalui file `.env`.
+Repository: git@github.com:siprahanpas-bot/rahanpas-server-manager-frontend.git
 
----
+1. Arsitektur & Third-Party yang Terpasang
+Nuxt 3 (3.17.5) — Framework utama berbasis Vue 3 dengan mesin server Nitro untuk rendering dan internal API routing (/manager-api).
 
-## 🚀 Prasyarat
-- Docker & Docker Compose terinstal di server.
-- Akses Git / SSH Key terhubung ke GitHub.
+Guacamole Common JS (guacamole-common-js ^1.5.0) — Pustaka klien HTML5 resmi dari Apache Guacamole untuk menampilkan dan mengontrol sesi Remote Desktop (RDP/VNC) langsung di browser melalui WebSocket.
 
----
+Docker Multi-Stage Node Alpine — Menjalankan proses nuxt build dan menyajikan aplikasi production secara ringan.
 
-## 📦 Panduan Instalasi & Deployment
+2. Panduan Deployment
+Langkah 1: Clone Repository
+Bash
+git clone git@github.com:siprahanpas-bot/rahanpas-server-manager-frontend.git /opt/rahanpas-server-manager/frontend
+cd /opt/rahanpas-server-manager/frontend
+Langkah 2: Konfigurasi .env & Custom Port
+Salin file .env.example menjadi .env:
 
-### 1. Clone Repository
-```bash
-git clone git@github.com:siprahanpas-bot/rahanpas-server-manager-frontend.git .
-2. Konfigurasi Environment (.env)
-Salin file .env.example menjadi .env dan sesuaikan port publik sesuai keinginan Anda:
+Bash
 cp .env.example .env
 nano .env
-Contoh isi .env:
-FRONTEND_PORT=3000
+Sesuaikan port dan alamat internal backend:
+
+Cuplikan kode
+# Ubah APP_PORT sesuai port yang diinginkan di server
+APP_PORT=13000
+
+CONTAINER_NAME=rahanpas-server-manager-frontend
 DOCKER_NETWORK=baota_net
-3. Menjalankan Docker Container
-Pastikan Docker network eksternal tersedia, lalu build dan jalankan:
-docker network create baota_net || true
+
+NITRO_HOST=0.0.0.0
+NITRO_PORT=3000
+
+# Arahkan ke container Nginx backend dalam satu Docker network
+NUXT_API_INTERNAL_BASE=http://rahanpas-backend-nginx/api
+Langkah 3: Build & Jalankan Container
+Pastikan backend sudah berjalan di network baota_net, lalu jalankan:
+
+Bash
+docker network create baota_net 2>/dev/null || true
 docker compose up -d --build
-🛠️ Penjelasan Third-Party / Tech Stack
-Nuxt 3 (Vue.js Framework): Framework SSR/SPA modern untuk antarmuka pengguna.
+Aplikasi frontend kini dapat diakses melalui http://IP_SERVER_ANDA:13000 (atau port lain sesuai APP_PORT).
 
-Guacamole Common JS (guacamole-common-js): Pustaka pihak ketiga yang digunakan untuk merender tampilan klien remote desktop (RDP/VNC) langsung di browser secara interaktif.
+3. Cara Mengubah Port di Kemudian Hari
+Edit nilai APP_PORT di file .env.
 
-Docker Multi-stage Build / Node Alpine: Lingkungan kontainerisasi yang ringan dan optimal untuk build serta production runtime aplikasi Nuxt.
+Terapkan ulang tanpa perlu rebuild image:
+
+Bash
+docker compose up -d
