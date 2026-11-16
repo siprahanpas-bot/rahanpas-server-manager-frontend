@@ -1,0 +1,903 @@
+<script setup lang="ts">
+interface ManagedServer {
+  id: number
+  name: string
+  hostname: string | null
+  ip_address: string | null
+  os_type: 'linux' | 'windows'
+  connection_protocol: string
+  port: number
+  username: string
+  auth_method: 'password' | 'private_key'
+  verify_host_key: boolean
+  host_key_fingerprint: string | null
+  status: string
+  last_checked_at: string | null
+  last_error: string | null
+  notes: string | null
+  created_at: string
+  updated_at: string
+}
+
+const route = useRoute()
+const serverId = String(route.params.id)
+
+const server = ref<ManagedServer | null>(null)
+const loading = ref(true)
+const saving = ref(false)
+const deleting = ref(false)
+const editing = ref(false)
+const errorMessage = ref('')
+const fieldErrors = ref<Record<string, string[]>>({})
+
+const discoveringHostKey = ref(false)
+const testingConnection = ref(false)
+const connectionMessage = ref('')
+const connectionError = ref('')
+const hostKeyCandidate = ref<{
+  key_type: string
+  fingerprint: string
+} | null>(null)
+const fingerprintTrusted = ref(false)
+
+
+const form = reactive({
+  name: '',
+  hostname: '',
+  ip_address: '',
+  os_type: 'linux',
+  connection_protocol: 'ssh',
+  port: 22,
+  username: '',
+  auth_method: 'password',
+  password: '',
+  private_key: '',
+  private_key_passphrase: '',
+  verify_host_key: true,
+  host_key_fingerprint: '',
+  notes: ''
+})
+
+const protocolLabel = computed(() => {
+  const labels: Record<string, string> = {
+    ssh: 'SSH',
+    winrm: 'WinRM',
+    windows_openssh: 'Windows OpenSSH'
+  }
+  return labels[server.value?.connection_protocol || ''] || '-'
+})
+
+const authLabel = computed(() =>
+  server.value?.auth_method === 'private_key'
+    ? 'SSH Private Key'
+    : 'Username & Password'
+)
+
+function statusClass(status: string) {
+  return {
+    online: 'status-online',
+    offline: 'status-offline',
+    error: 'status-error',
+    unknown: 'status-unknown'
+  }[status] || 'status-unknown'
+}
+
+function formatDate(value: string | null) {
+  if (!value) return 'Belum diperiksa'
+
+  return new Date(value).toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  })
+}
+
+function populateForm(data: ManagedServer) {
+  form.name = data.name
+  form.hostname = data.hostname || ''
+  form.ip_address = data.ip_address || ''
+  form.os_type = data.os_type
+  form.connection_protocol = data.connection_protocol
+  form.port = data.port
+  form.username = data.username
+  form.auth_method = data.auth_method
+  form.password = ''
+  form.private_key = ''
+  form.private_key_passphrase = ''
+  form.verify_host_key = data.verify_host_key
+  form.host_key_fingerprint = data.host_key_fingerprint || ''
+  form.notes = data.notes || ''
+}
+
+async function loadServer() {
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    const result: any = await $fetch(`/manager-api/servers/${serverId}`)
+    server.value = result.server
+    populateForm(result.server)
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    errorMessage.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal mengambil informasi server.'
+  } finally {
+    loading.value = false
+  }
+}
+
+function cancelEdit() {
+  if (server.value) populateForm(server.value)
+  editing.value = false
+  errorMessage.value = ''
+  fieldErrors.value = {}
+}
+
+watch(() => form.os_type, (os) => {
+  if (os === 'linux') {
+    form.connection_protocol = 'ssh'
+    form.port = 22
+  } else {
+    form.connection_protocol = 'winrm'
+    form.port = 5985
+  }
+})
+
+watch(() => form.connection_protocol, (protocol) => {
+  form.port = protocol === 'winrm' ? 5985 : 22
+
+  if (protocol === 'winrm' && form.auth_method === 'private_key') {
+    form.auth_method = 'password'
+  }
+})
+
+watch(() => form.auth_method, () => {
+  form.password = ''
+  form.private_key = ''
+  form.private_key_passphrase = ''
+})
+
+async function saveChanges() {
+  saving.value = true
+  errorMessage.value = ''
+  fieldErrors.value = {}
+
+  const payload: Record<string, any> = {
+    name: form.name,
+    hostname: form.hostname || null,
+    ip_address: form.ip_address || null,
+    os_type: form.os_type,
+    connection_protocol: form.connection_protocol,
+    port: form.port,
+    username: form.username,
+    auth_method: form.auth_method,
+    verify_host_key: form.verify_host_key,
+    host_key_fingerprint: form.host_key_fingerprint || null,
+    notes: form.notes || null
+  }
+
+  // Jangan kirim credential lama atau field credential kosong.
+  // Credential hanya dikirim jika pengguna memasukkan yang baru.
+  if (form.auth_method === 'password' && form.password) {
+    payload.password = form.password
+  }
+
+  if (form.auth_method === 'private_key') {
+    if (form.private_key) {
+      payload.private_key = form.private_key
+      payload.private_key_passphrase =
+        form.private_key_passphrase || null
+    }
+  }
+
+  try {
+    const result: any = await $fetch(
+      `/manager-api/servers/${serverId}`,
+      {
+        method: 'PUT',
+        body: payload
+      }
+    )
+
+    server.value = result.server
+    populateForm(result.server)
+    editing.value = false
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    errorMessage.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal memperbarui konfigurasi server.'
+
+    fieldErrors.value =
+      error.data?.data?.errors ||
+      error.data?.errors ||
+      {}
+  } finally {
+    saving.value = false
+  }
+}
+
+
+async function discoverHostKey() {
+  if (!server.value) return
+
+  discoveringHostKey.value = true
+  connectionError.value = ''
+  connectionMessage.value = ''
+  hostKeyCandidate.value = null
+  fingerprintTrusted.value = false
+
+  try {
+    const result: any = await $fetch(
+      `/manager-api/servers/${serverId}/discover-host-key`,
+      { method: 'POST' }
+    )
+
+    hostKeyCandidate.value = result.host_key
+    connectionMessage.value =
+      result.warning ||
+      'Bandingkan fingerprint dengan server melalui jalur tepercaya.'
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    connectionError.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal mengambil SSH host key.'
+  } finally {
+    discoveringHostKey.value = false
+  }
+}
+
+function useDiscoveredFingerprint() {
+  if (!hostKeyCandidate.value || !fingerprintTrusted.value) return
+
+  form.host_key_fingerprint = hostKeyCandidate.value.fingerprint
+  form.verify_host_key = true
+
+  hostKeyCandidate.value = null
+  fingerprintTrusted.value = false
+  connectionMessage.value =
+    'Fingerprint dimasukkan ke form. Klik Save Changes untuk menyimpannya.'
+  editing.value = true
+}
+
+async function testConnection() {
+  if (!server.value || testingConnection.value) return
+
+  if (
+    !['ssh', 'windows_openssh'].includes(
+      server.value.connection_protocol
+    )
+  ) {
+    connectionError.value =
+      'Pengujian koneksi untuk protokol ini belum tersedia.'
+    return
+  }
+
+  if (
+    server.value.verify_host_key &&
+    !server.value.host_key_fingerprint
+  ) {
+    connectionError.value =
+      'Fingerprint host key belum tersimpan. Lakukan discovery, verifikasi, dan simpan fingerprint terlebih dahulu.'
+    return
+  }
+
+  testingConnection.value = true
+  connectionError.value = ''
+  connectionMessage.value = ''
+
+  try {
+    const result: any = await $fetch(
+      `/manager-api/servers/${serverId}/test-connection`,
+      { method: 'POST' }
+    )
+
+    if (result.server) {
+      server.value = result.server
+      populateForm(result.server)
+    }
+
+    connectionMessage.value =
+      result.message || 'Koneksi SSH berhasil.'
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    connectionError.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Pengujian koneksi gagal.'
+
+    // Ambil status terbaru yang mungkin sudah diperbarui backend.
+    await loadServer()
+  } finally {
+    testingConnection.value = false
+  }
+}
+
+async function deleteServer() {
+  if (!server.value) return
+
+  const confirmed = confirm(
+    `Apakah Anda yakin ingin menghapus server "${server.value.name}"?\n\nTindakan ini tidak dapat dibatalkan.`
+  )
+
+  if (!confirmed) return
+
+  deleting.value = true
+  errorMessage.value = ''
+
+  try {
+    await $fetch(`/manager-api/servers/${serverId}`, {
+      method: 'DELETE'
+    })
+
+    await navigateTo('/servers')
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    errorMessage.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal menghapus server.'
+  } finally {
+    deleting.value = false
+  }
+}
+
+onMounted(loadServer)
+</script>
+
+<template>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <div class="breadcrumb">
+          Workspace / Infrastructure / Servers / Detail
+        </div>
+        <h1>{{ server?.name || 'Server Detail' }}</h1>
+        <p>Informasi dan konfigurasi server yang terdaftar.</p>
+      </div>
+
+      <NuxtLink to="/servers" class="back-button">
+        ← Back to Servers
+      </NuxtLink>
+    </header>
+
+    <div class="content">
+      <div v-if="loading" class="loading">
+        Memuat informasi server...
+      </div>
+
+      <div v-else-if="!server" class="alert">
+        {{ errorMessage || 'Server tidak ditemukan.' }}
+      </div>
+
+      <template v-else>
+        <div class="summary-grid">
+          <article class="summary-card">
+            <span>SERVER STATUS</span>
+            <strong>
+              <span class="status" :class="statusClass(server.status)">
+                {{ server.status }}
+              </span>
+            </strong>
+            <small>
+              {{ server.status === 'unknown'
+                ? 'Monitoring belum dijalankan'
+                : server.last_error || 'Status koneksi terakhir' }}
+            </small>
+          </article>
+
+          <article class="summary-card">
+            <span>OPERATING SYSTEM</span>
+            <strong>
+              {{ server.os_type === 'linux' ? '🐧 Linux' : '▣ Windows' }}
+            </strong>
+            <small>{{ protocolLabel }}</small>
+          </article>
+
+          <article class="summary-card">
+            <span>IP ADDRESS</span>
+            <strong>{{ server.ip_address || '-' }}</strong>
+            <small>{{ server.hostname || 'Hostname tidak tersedia' }}</small>
+          </article>
+
+          <article class="summary-card">
+            <span>LAST CHECK</span>
+            <strong class="date-value">
+              {{ formatDate(server.last_checked_at) }}
+            </strong>
+            <small>
+              {{ server.last_checked_at
+                ? 'Pemeriksaan koneksi terakhir'
+                : 'Belum ada pemeriksaan koneksi' }}
+            </small>
+          </article>
+        </div>
+
+
+        <section v-if="!editing" class="connection-panel">
+          <div class="connection-heading">
+            <div>
+              <h2>SSH Connection & Host Verification</h2>
+              <p>
+                Discover fingerprint dan uji autentikasi SSH server.
+              </p>
+            </div>
+
+            <span
+              v-if="server.connection_protocol === 'winrm'"
+              class="protocol-note"
+            >
+              WinRM belum didukung
+            </span>
+          </div>
+
+          <div class="connection-actions">
+            <button
+              v-if="['ssh', 'windows_openssh'].includes(server.connection_protocol)"
+              type="button"
+              class="secondary-action"
+              :disabled="discoveringHostKey || testingConnection"
+              @click="discoverHostKey"
+            >
+              {{ discoveringHostKey ? 'Discovering...' : 'Discover Host Key' }}
+            </button>
+
+            <button
+              v-if="['ssh', 'windows_openssh'].includes(server.connection_protocol)"
+              type="button"
+              class="primary-action"
+              :disabled="testingConnection || discoveringHostKey"
+              @click="testConnection"
+            >
+              {{ testingConnection ? 'Testing...' : 'Test SSH Connection' }}
+            </button>
+
+            <button
+              type="button"
+              class="secondary-action"
+              @click="editing = true; connectionError = ''; connectionMessage = ''"
+            >
+              Edit Configuration
+            </button>
+          </div>
+
+          <div v-if="hostKeyCandidate" class="fingerprint-candidate">
+            <h3>Discovered Host Key</h3>
+
+            <div class="candidate-detail">
+              <span>Key Algorithm</span>
+              <strong>{{ hostKeyCandidate.key_type }}</strong>
+            </div>
+
+            <div class="candidate-detail">
+              <span>SHA256 Fingerprint</span>
+              <code>{{ hostKeyCandidate.fingerprint }}</code>
+            </div>
+
+            <p class="security-warning">
+              Jangan percaya fingerprint hanya karena berhasil diambil dari
+              jaringan. Bandingkan dengan fingerprint yang diperoleh langsung
+              dari server melalui console atau jalur tepercaya.
+            </p>
+
+            <label class="trust-confirmation">
+              <input v-model="fingerprintTrusted" type="checkbox" />
+              <span>
+                Saya sudah membandingkan fingerprint ini melalui jalur
+                tepercaya dan memastikan nilainya cocok.
+              </span>
+            </label>
+
+            <button
+              type="button"
+              class="primary-action"
+              :disabled="!fingerprintTrusted"
+              @click="useDiscoveredFingerprint"
+            >
+              Use Verified Fingerprint
+            </button>
+          </div>
+
+          <p v-if="connectionMessage" class="connection-success" role="status">
+            {{ connectionMessage }}
+          </p>
+
+          <p v-if="connectionError" class="connection-error" role="alert">
+            {{ connectionError }}
+          </p>
+
+          <p
+            v-if="!server.verify_host_key"
+            class="security-warning"
+          >
+            Peringatan: verifikasi host key dinonaktifkan. Identitas server
+            tidak diperiksa sebelum autentikasi.
+          </p>
+
+          <p
+            v-else-if="!server.host_key_fingerprint"
+            class="security-warning"
+          >
+            Host key belum terdaftar. Test Connection akan ditolak sampai
+            fingerprint diverifikasi dan disimpan.
+          </p>
+        </section>
+
+        <section class="configuration">
+          <div class="section-heading">
+            <div>
+              <h2>Server Configuration</h2>
+              <p>Informasi konfigurasi server yang tersimpan.</p>
+            </div>
+
+            <button
+              v-if="!editing"
+              class="edit-button"
+              @click="editing = true"
+            >
+              ✎ Edit Server
+            </button>
+          </div>
+
+          <div v-if="!editing" class="details">
+            <div class="detail-item">
+              <span>Server Name</span>
+              <strong>{{ server.name }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>IP Address</span>
+              <strong>{{ server.ip_address || '-' }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Hostname / FQDN</span>
+              <strong>{{ server.hostname || '-' }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Operating System</span>
+              <strong>{{ server.os_type }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Connection Protocol</span>
+              <strong>{{ protocolLabel }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Port</span>
+              <strong>{{ server.port }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Username</span>
+              <strong>{{ server.username }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Authentication</span>
+              <strong>{{ authLabel }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Host Key Verification</span>
+              <strong>
+                {{ server.connection_protocol === 'winrm'
+                  ? 'Not applicable'
+                  : server.verify_host_key ? 'Enabled' : 'Disabled' }}
+              </strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Host Key Fingerprint</span>
+              <strong>{{ server.host_key_fingerprint || '-' }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Created At</span>
+              <strong>{{ formatDate(server.created_at) }}</strong>
+            </div>
+
+            <div class="detail-item">
+              <span>Last Updated</span>
+              <strong>{{ formatDate(server.updated_at) }}</strong>
+            </div>
+
+            <div class="detail-item full">
+              <span>NOTES</span>
+              <strong class="notes">
+                {{ server.notes || 'Tidak ada catatan.' }}
+              </strong>
+            </div>
+          </div>
+
+          <form v-else class="edit-form" @submit.prevent="saveChanges">
+            <div class="form-section">
+              <h3>01. Server Information</h3>
+
+              <div class="fields">
+                <label class="field full">
+                  <span>Server Name *</span>
+                  <input v-model.trim="form.name" required maxlength="100" />
+                  <small v-if="fieldErrors.name" class="field-error">{{ fieldErrors.name[0] }}</small>
+                </label>
+
+                <label class="field">
+                  <span>IP Address</span>
+                  <input v-model.trim="form.ip_address" placeholder="192.168.1.10" />
+                  <small v-if="fieldErrors.ip_address" class="field-error">{{ fieldErrors.ip_address[0] }}</small>
+                </label>
+
+                <label class="field">
+                  <span>Hostname / FQDN</span>
+                  <input v-model.trim="form.hostname" placeholder="server.example.com" />
+                </label>
+
+                <label class="field">
+                  <span>Operating System *</span>
+                  <select v-model="form.os_type">
+                    <option value="linux">Linux</option>
+                    <option value="windows">Windows Server</option>
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Connection Protocol *</span>
+                  <select v-model="form.connection_protocol">
+                    <option v-if="form.os_type === 'linux'" value="ssh">SSH</option>
+                    <template v-else>
+                      <option value="winrm">WinRM</option>
+                      <option value="windows_openssh">Windows OpenSSH</option>
+                    </template>
+                  </select>
+                  <small v-if="fieldErrors.connection_protocol" class="field-error">{{ fieldErrors.connection_protocol[0] }}</small>
+                </label>
+
+                <label class="field">
+                  <span>Port *</span>
+                  <input v-model.number="form.port" type="number" min="1" max="65535" required />
+                </label>
+
+                <label class="field">
+                  <span>Username *</span>
+                  <input v-model.trim="form.username" required maxlength="100" />
+                </label>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h3>02. Authentication</h3>
+              <p class="section-description">
+                Credential tersimpan tidak ditampilkan. Kosongkan credential jika tidak ingin menggantinya.
+              </p>
+
+              <div class="fields">
+                <label class="field full">
+                  <span>Authentication Method *</span>
+                  <select v-model="form.auth_method">
+                    <option value="password">Username & Password</option>
+                    <option value="private_key" :disabled="form.connection_protocol === 'winrm'">
+                      SSH Private Key
+                    </option>
+                  </select>
+                </label>
+
+                <label v-if="form.auth_method === 'password'" class="field full">
+                  <span>New Password</span>
+                  <input
+                    v-model="form.password"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="Kosongkan jika tidak ingin mengganti password"
+                  />
+                  <small v-if="fieldErrors.password" class="field-error">{{ fieldErrors.password[0] }}</small>
+                </label>
+
+                <template v-if="form.auth_method === 'private_key'">
+                  <label class="field full">
+                    <span>New Private Key</span>
+                    <textarea
+                      v-model="form.private_key"
+                      rows="7"
+                      spellcheck="false"
+                      placeholder="Tempel private key baru jika ingin menggantinya"
+                    />
+                    <small v-if="fieldErrors.private_key" class="field-error">{{ fieldErrors.private_key[0] }}</small>
+                  </label>
+
+                  <label class="field full">
+                    <span>New Private Key Passphrase</span>
+                    <input
+                      v-model="form.private_key_passphrase"
+                      type="password"
+                      autocomplete="new-password"
+                      placeholder="Opsional"
+                    />
+                  </label>
+                </template>
+              </div>
+            </div>
+
+            <div class="form-section">
+              <h3>03. Security & Notes</h3>
+
+              <label v-if="form.connection_protocol !== 'winrm'" class="checkbox-field">
+                <input v-model="form.verify_host_key" type="checkbox" />
+                <span>
+                  <strong>Require host key verification</strong>
+                  <small>Identitas SSH server harus diverifikasi sebelum koneksi.</small>
+                </span>
+              </label>
+
+              <label class="field full">
+                <span>Host Key Fingerprint</span>
+                <input v-model.trim="form.host_key_fingerprint" placeholder="SHA256:..." />
+              </label>
+
+              <label class="field full notes-field">
+                <span>Notes</span>
+                <textarea v-model="form.notes" rows="3" />
+              </label>
+            </div>
+
+            <div v-if="errorMessage" class="alert" role="alert">
+              {{ errorMessage }}
+            </div>
+
+            <div class="form-actions">
+              <button type="button" class="cancel-button" @click="cancelEdit">
+                Cancel
+              </button>
+              <button type="submit" class="save-button" :disabled="saving">
+                {{ saving ? 'Saving...' : 'Save Changes' }}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section v-if="!editing" class="danger-zone">
+          <div>
+            <h2>Danger Zone</h2>
+            <p>Penghapusan server tidak dapat dibatalkan.</p>
+          </div>
+
+          <button
+            class="delete-button"
+            :disabled="deleting"
+            @click="deleteServer"
+          >
+            {{ deleting ? 'Deleting...' : 'Delete Server' }}
+          </button>
+        </section>
+      </template>
+
+      <div v-if="errorMessage && server && !editing" class="alert">
+        {{ errorMessage }}
+      </div>
+    </div>
+  </main>
+</template>
+
+<style scoped>
+.page { min-height:100vh; background:#080d18; color:#e2e8f0; }
+.topbar { min-height:105px; padding:22px 36px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid #1e293b; }
+.breadcrumb { color:#64748b; font-size:10px; margin-bottom:8px; }
+h1 { margin:0; font-size:22px; }
+.topbar p { margin:7px 0 0; color:#94a3b8; font-size:11px; }
+.back-button { padding:10px 13px; border:1px solid #334155; border-radius:7px; color:#cbd5e1; text-decoration:none; font-size:10px; }
+.content { max-width:1250px; margin:auto; padding:27px 36px 55px; }
+.loading,.empty { padding:50px; text-align:center; color:#94a3b8; }
+.summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+.summary-card { min-width:0; padding:18px; border:1px solid #263449; border-radius:10px; background:#101a2a; }
+.summary-card > span { display:block; color:#94a3b8; font-size:9px; letter-spacing:.07em; }
+.summary-card > strong { display:block; margin:12px 0 7px; font-size:17px; overflow-wrap:anywhere; }
+.summary-card > small { display:block; color:#64748b; font-size:9px; line-height:1.6; overflow-wrap:anywhere; }
+.summary-card .date-value { font-size:12px; }
+.status { display:inline-block; padding:5px 9px; border-radius:20px; font-size:10px; text-transform:capitalize; }
+.status-online { color:#86efac; background:#143b32; }
+.status-offline,.status-error { color:#fca5a5; background:#451f28; }
+.status-unknown { color:#cbd5e1; background:#293548; }
+
+.connection-panel { margin-top:24px; padding:22px; border:1px solid #263449; border-radius:10px; background:#101a2a; }
+.connection-heading { display:flex; justify-content:space-between; align-items:center; gap:15px; }
+.connection-heading h2 { margin:0; font-size:15px; }
+.connection-heading p { margin:7px 0 0; color:#94a3b8; font-size:10px; }
+.connection-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; }
+.primary-action,.secondary-action { padding:10px 14px; border-radius:7px; font-size:10px; font-weight:700; cursor:pointer; }
+.primary-action { border:0; background:#2563eb; color:white; }
+.secondary-action { border:1px solid #334155; background:transparent; color:#cbd5e1; }
+.primary-action:disabled,.secondary-action:disabled { opacity:.45; cursor:not-allowed; }
+.protocol-note { color:#fbbf24; font-size:10px; }
+.fingerprint-candidate { margin-top:20px; padding:17px; border:1px solid #475569; border-radius:8px; background:#0b1423; }
+.fingerprint-candidate h3 { margin:0 0 15px; font-size:12px; }
+.candidate-detail { margin:12px 0; }
+.candidate-detail span { display:block; margin-bottom:6px; color:#94a3b8; font-size:9px; }
+.candidate-detail strong,.candidate-detail code { display:block; color:#e2e8f0; font-size:11px; overflow-wrap:anywhere; }
+.security-warning { margin:15px 0; color:#fbbf24; font-size:10px; line-height:1.7; }
+.trust-confirmation { display:flex; align-items:flex-start; gap:9px; margin:15px 0; color:#cbd5e1; font-size:10px; line-height:1.7; }
+.trust-confirmation input { margin-top:3px; accent-color:#2563eb; }
+.connection-success,.connection-error { margin:15px 0 0; font-size:10px; line-height:1.7; overflow-wrap:anywhere; }
+.connection-success { color:#86efac; }
+.connection-error { color:#fca5a5; }
+
+.configuration { margin-top:24px; border:1px solid #263449; border-radius:10px; background:#101a2a; overflow:hidden; }
+.section-heading { padding:22px; display:flex; justify-content:space-between; align-items:center; gap:15px; border-bottom:1px solid #263449; }
+.section-heading h2 { margin:0; font-size:15px; }
+.section-heading p { margin:7px 0 0; color:#94a3b8; font-size:10px; }
+.edit-button,.save-button { padding:10px 14px; border:0; border-radius:7px; background:#2563eb; color:white; font-size:10px; font-weight:700; cursor:pointer; }
+.details { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.detail-item { min-width:0; padding:17px 22px; border-bottom:1px solid #263449; }
+.detail-item:nth-child(odd):not(.full) { border-right:1px solid #263449; }
+.detail-item span { display:block; margin-bottom:8px; color:#94a3b8; font-size:9px; }
+.detail-item strong { display:block; color:#e2e8f0; font-size:11px; overflow-wrap:anywhere; }
+.detail-item.full { grid-column:1/-1; }
+.detail-item .notes { color:#94a3b8; font-weight:400; white-space:pre-wrap; line-height:1.7; }
+.edit-form { padding:0; }
+.form-section { padding:23px; border-bottom:1px solid #263449; }
+.form-section h3 { margin:0 0 20px; font-size:12px; }
+.section-description { margin:-10px 0 18px; color:#94a3b8; font-size:10px; }
+.fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:17px; }
+.field { min-width:0; display:flex; flex-direction:column; gap:8px; }
+.field.full { grid-column:1/-1; }
+.field > span { color:#cbd5e1; font-size:10px; font-weight:700; }
+.field input,.field select,.field textarea { width:100%; min-width:0; padding:11px 12px; border:1px solid #334155; border-radius:7px; outline:none; background:#0b1423; color:#e2e8f0; font:inherit; font-size:11px; }
+.field textarea { resize:vertical; line-height:1.6; }
+.field input:focus,.field select:focus,.field textarea:focus { border-color:#3b82f6; }
+.field small { color:#64748b; font-size:9px; line-height:1.6; }
+.field .field-error { color:#fca5a5; }
+.checkbox-field { display:flex; align-items:flex-start; gap:11px; margin-bottom:20px; cursor:pointer; }
+.checkbox-field input { margin-top:3px; accent-color:#2563eb; }
+.checkbox-field strong,.checkbox-field small { display:block; }
+.checkbox-field strong { font-size:10px; }
+.checkbox-field small { margin-top:5px; color:#94a3b8; font-size:9px; }
+.notes-field { margin-top:20px; }
+.form-actions { display:flex; justify-content:flex-end; gap:10px; padding:18px 23px; }
+.cancel-button,.save-button { padding:10px 15px; border-radius:7px; font-size:10px; cursor:pointer; }
+.cancel-button { border:1px solid #334155; background:transparent; color:#cbd5e1; }
+.save-button:disabled,.delete-button:disabled { opacity:.5; cursor:wait; }
+.danger-zone { margin-top:24px; padding:21px; border:1px solid #7f1d1d; border-radius:10px; background:#24131b; display:flex; justify-content:space-between; align-items:center; gap:15px; }
+.danger-zone h2 { margin:0; color:#fca5a5; font-size:13px; }
+.danger-zone p { margin:7px 0 0; color:#a1a1aa; font-size:10px; }
+.delete-button { padding:10px 14px; border:1px solid #991b1b; border-radius:7px; background:#7f1d1d; color:white; font-size:10px; font-weight:700; cursor:pointer; }
+.alert { margin:15px 0; padding:12px; border:1px solid #7f1d1d; border-radius:7px; background:#451a1a; color:#fecaca; font-size:11px; }
+@media(max-width:850px) { .summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) {
+  .topbar { padding:18px; align-items:flex-start; flex-direction:column; }
+  .content { padding:15px 10px 35px; }
+  .summary-grid { grid-template-columns:1fr 1fr; gap:8px; }
+  .summary-card { padding:13px; }
+  .summary-card > strong { font-size:13px; }
+  .section-heading { padding:17px; align-items:flex-start; }
+  .details { grid-template-columns:1fr; }
+  .detail-item:nth-child(odd):not(.full) { border-right:0; }
+  .detail-item.full { grid-column:auto; }
+  .form-section { padding:18px 14px; }
+  .fields { grid-template-columns:1fr; }
+  .field.full { grid-column:auto; }
+  .danger-zone { align-items:flex-start; flex-direction:column; }
+}
+</style>
