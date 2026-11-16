@@ -1,0 +1,16 @@
+node_modules/
+.nuxt/
+.output/
+.output.*
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+*.bak
+*.backup*
+*.before-*
+*.bak-*
+backups/

@@ -1,0 +1,15 @@
+{
+  "name": "rahanpas-server-manager-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev --host 0.0.0.0",
+    "build": "nuxt build",
+    "preview": "nuxt preview --host 0.0.0.0",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "guacamole-common-js": "^1.5.0",
+    "nuxt": "3.17.5"
+  }
+}

@@ -1,0 +1,455 @@
+<script setup lang="ts">
+interface ManagedServer {
+  id: number
+  name: string
+  hostname: string | null
+  ip_address: string | null
+  os_type: 'linux' | 'windows'
+  connection_protocol: string
+  port: number
+  username: string
+  auth_method: string
+  status: string
+  last_checked_at: string | null
+  notes: string | null
+}
+
+const servers = ref<ManagedServer[]>([])
+const loading = ref(true)
+const deletingId = ref<number | null>(null)
+const errorMessage = ref('')
+const search = ref('')
+const currentPage = ref(1)
+const lastPage = ref(1)
+const total = ref(0)
+
+const filteredServers = computed(() => {
+  const keyword = search.value.trim().toLowerCase()
+
+  if (!keyword) return servers.value
+
+  return servers.value.filter(server =>
+    [
+      server.name,
+      server.hostname,
+      server.ip_address,
+      server.os_type,
+      server.username
+    ].some(value => String(value || '').toLowerCase().includes(keyword))
+  )
+})
+
+const onlineCount = computed(() =>
+  servers.value.filter(server => server.status === 'online').length
+)
+
+const offlineCount = computed(() =>
+  servers.value.filter(server => server.status === 'offline').length
+)
+
+async function loadServers(page = 1) {
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    const result: any = await $fetch('/manager-api/servers', {
+      query: { page }
+    })
+
+    servers.value = result.data || []
+    currentPage.value = result.current_page || 1
+    lastPage.value = result.last_page || 1
+    total.value = result.total || 0
+  } catch (error: any) {
+    if (error.statusCode === 401) {
+      await navigateTo('/')
+      return
+    }
+
+    errorMessage.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal mengambil daftar server.'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function deleteServer(server: ManagedServer) {
+  if (!confirm(`Hapus server "${server.name}"? Tindakan ini tidak dapat dibatalkan.`)) {
+    return
+  }
+
+  deletingId.value = server.id
+  errorMessage.value = ''
+
+  try {
+    await $fetch(`/manager-api/servers/${server.id}`, {
+      method: 'DELETE'
+    })
+
+    await loadServers(
+      servers.value.length === 1 && currentPage.value > 1
+        ? currentPage.value - 1
+        : currentPage.value
+    )
+  } catch (error: any) {
+    errorMessage.value =
+      error.data?.statusMessage ||
+      error.data?.message ||
+      'Gagal menghapus server.'
+  } finally {
+    deletingId.value = null
+  }
+}
+
+function statusClass(status: string) {
+  return {
+    online: 'status-online',
+    offline: 'status-offline',
+    error: 'status-error',
+    unknown: 'status-unknown'
+  }[status] || 'status-unknown'
+}
+
+function formatDate(value: string | null) {
+  if (!value) return 'Belum diperiksa'
+
+  return new Date(value).toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  })
+}
+
+onMounted(() => loadServers())
+
+onMounted(async () => {
+  try {
+    const authUser: any = await $fetch('/auth/me')
+    const perms = Array.isArray(authUser?.permissions) ? authUser.permissions : []
+    if (!authUser?.is_super_admin && !perms.includes('server.view')) {
+      await navigateTo('/dashboard?denied=server.view')
+    }
+  } catch {
+    await navigateTo('/')
+  }
+})
+</script>
+
+<template>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <div class="breadcrumb">Workspace / Infrastructure / Servers</div>
+        <h1>Server Inventory</h1>
+        <p class="subtitle">Kelola seluruh server Linux dan Windows Anda.</p>
+      </div>
+
+      <div class="servers-header-actions">
+        <NuxtLink to="/dashboard" class="servers-home-button">
+          <span aria-hidden="true">⌂</span>
+          Home
+        </NuxtLink>
+        <NuxtLink to="/servers/create" class="primary-button">
+        <span>＋</span> Add Server
+      </NuxtLink>
+      </div>
+    </header>
+
+    <div class="content">
+      <div class="stats">
+        <article class="stat">
+          <span>Total Servers</span>
+          <strong>{{ total }}</strong>
+          <small>Server terdaftar</small>
+        </article>
+
+        <article class="stat">
+          <span>Online</span>
+          <strong class="green">{{ onlineCount }}</strong>
+          <small>Di halaman ini</small>
+        </article>
+
+        <article class="stat">
+          <span>Offline</span>
+          <strong class="red">{{ offlineCount }}</strong>
+          <small>Di halaman ini</small>
+        </article>
+
+        <article class="stat">
+          <span>Connection Status</span>
+          <strong class="blue">--</strong>
+          <small>Monitoring belum diaktifkan</small>
+        </article>
+      </div>
+
+      <section class="inventory">
+        <div class="inventory-heading">
+          <div>
+            <h2>Registered Servers</h2>
+            <p>Daftar server yang terhubung ke akun Anda.</p>
+          </div>
+
+          <button class="refresh-button" :disabled="loading" @click="loadServers(currentPage)">
+            ↻ Refresh
+          </button>
+        </div>
+
+        <div class="toolbar">
+          <input
+            v-model="search"
+            type="search"
+            placeholder="Cari nama, IP, hostname, OS..."
+          />
+          <span>{{ filteredServers.length }} ditampilkan</span>
+        </div>
+
+        <div v-if="errorMessage" class="alert" role="alert">
+          {{ errorMessage }}
+        </div>
+
+        <div v-if="loading" class="empty">
+          Memuat daftar server...
+        </div>
+
+        <div v-else-if="filteredServers.length === 0" class="empty">
+          <div class="empty-icon">▣</div>
+          <strong>{{ search ? 'Server tidak ditemukan' : 'Belum ada server terdaftar' }}</strong>
+          <p>
+            {{ search
+              ? 'Coba gunakan kata kunci pencarian lain.'
+              : 'Tambahkan server pertama Anda untuk mulai mengelola infrastruktur.' }}
+          </p>
+          <NuxtLink v-if="!search" to="/servers/create" class="primary-button">
+            ＋ Add your first server
+          </NuxtLink>
+        </div>
+
+        <div v-else class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>SERVER</th>
+                <th>OPERATING SYSTEM</th>
+                <th>CONNECTION</th>
+                <th>STATUS</th>
+                <th>MASA AKTIF</th>
+                <th>LAST CHECK</th>
+                <th>ACTIONS</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              <tr v-for="server in filteredServers" :key="server.id">
+                <td>
+                  <NuxtLink v-if="server.ip_access?.allowed !== false" :to="`/servers/${server.id}`" class="server-name">
+                    {{ server.name }}
+                  </NuxtLink>
+                  <span v-else class="server-name-locked">
+                    {{ server.name }}
+                  </span>
+                  <small>{{ server.ip_address || server.hostname || 'No address' }}</small>
+                  <small
+                    v-if="server.ip_access && !server.ip_access.allowed"
+                    class="ip-lock-note"
+                  >
+                    {{ server.ip_access.label }}
+                  </small>
+                </td>
+
+                <td>
+                  <span class="os-label">
+                    {{ server.os_type === 'linux' ? '🐧 Linux' : '▣ Windows' }}
+                  </span>
+                </td>
+
+                <td>
+                  <strong class="protocol">{{ server.connection_protocol.toUpperCase() }}</strong>
+                  <small>Port {{ server.port }}</small>
+                </td>
+
+                <td>
+                  <span class="status" :class="statusClass(server.status)">
+                    {{ server.status }}
+                  </span>
+                </td>
+
+                <td>
+                  <span
+                    v-if="server.ip_access"
+                    class="masa-aktif-badge"
+                    :class="server.ip_access.status"
+                  >
+                    {{ server.ip_access.label }}
+                  </span>
+                  <span v-else class="masa-aktif-badge permanent">
+                    Aktif Permanen
+                  </span>
+                </td>
+
+                <td class="date-cell">
+                  {{ formatDate(server.last_checked_at) }}
+                </td>
+
+                <td>
+                  <div class="actions">
+                    <NuxtLink v-if="server.ip_access?.allowed !== false" :to="`/servers/${server.id}`">Detail</NuxtLink>
+                    <span v-else class="locked-pill" :title="server.ip_access?.message || 'Tidak aktif'">Terkunci</span>
+                    <button
+                      class="delete-button"
+                      :disabled="deletingId === server.id"
+                      @click="deleteServer(server)"
+                    >
+                      {{ deletingId === server.id ? '...' : 'Delete' }}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="!loading && lastPage > 1" class="pagination">
+          <button :disabled="currentPage <= 1" @click="loadServers(currentPage - 1)">
+            ← Previous
+          </button>
+          <span>Page {{ currentPage }} of {{ lastPage }}</span>
+          <button :disabled="currentPage >= lastPage" @click="loadServers(currentPage + 1)">
+            Next →
+          </button>
+        </div>
+      </section>
+    </div>
+  </main>
+</template>
+
+<style scoped>
+.page { min-height:100vh; background:var(--app-bg); color:var(--text); }
+.topbar { min-height:105px; padding:22px 36px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid var(--border-subtle); }
+.breadcrumb { color:var(--text-muted); font-size:10px; margin-bottom:8px; }
+h1 { margin:0; font-size:22px; }
+.subtitle,.inventory-heading p { color:var(--text-secondary); font-size:11px; margin:7px 0 0; }
+.primary-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:11px 15px; border:0; border-radius:7px; background:#2563eb; color:white; text-decoration:none; font-size:11px; font-weight:700; cursor:pointer; }
+.primary-button:hover { background:#1d4ed8; }
+.content { max-width:1500px; margin:auto; padding:27px 36px 50px; }
+.stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; }
+.stat { padding:18px; border:1px solid var(--border); border-radius:10px; background:var(--surface); }
+.stat span,.stat strong,.stat small { display:block; }
+.stat span { color:var(--text-secondary); font-size:10px; }
+.stat strong { margin:10px 0 6px; font-size:25px; }
+.stat small { color:var(--text-muted); font-size:9px; }
+.green { color:#4ade80; }.red { color:#f87171; }.blue { color:var(--primary-text); }
+.inventory { margin-top:25px; border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden; }
+.inventory-heading { padding:21px; display:flex; justify-content:space-between; align-items:center; gap:15px; }
+.inventory-heading h2 { margin:0; font-size:15px; }
+.refresh-button { border:1px solid var(--border-strong); border-radius:7px; padding:9px 12px; background:transparent; color:var(--text-soft); font-size:10px; cursor:pointer; }
+.refresh-button:disabled { opacity:.5; }
+.toolbar { padding:13px 21px; display:flex; justify-content:space-between; align-items:center; gap:15px; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+.toolbar input { width:min(100%,380px); padding:10px 12px; border:1px solid var(--border-strong); border-radius:7px; outline:none; background:var(--surface-muted); color:var(--text); font-size:11px; }
+.toolbar input:focus { border-color:#3b82f6; }
+.toolbar span { color:var(--text-muted); font-size:10px; }
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; text-align:left; white-space:nowrap; }
+th { padding:13px 16px; color:var(--text-muted); background:#0c1524; font-size:9px; letter-spacing:.08em; }
+td { padding:15px 16px; border-top:1px solid var(--border); font-size:10px; }
+td small { display:block; margin-top:5px; color:var(--text-muted); font-size:9px; }
+.server-name { color:var(--primary-soft-text); font-size:11px; font-weight:700; text-decoration:none; }
+.server-name:hover { text-decoration:underline; }
+.os-label { color:var(--text-soft); }
+.protocol { font-size:10px; color:var(--text-soft); }
+.status { display:inline-block; padding:5px 8px; border-radius:20px; font-size:9px; text-transform:capitalize; }
+.status-online { color:var(--success-text); background:var(--success-bg); }
+.status-offline,.status-error { color:var(--danger-text); background:#451f28; }
+.status-unknown { color:var(--text-soft); background:var(--border); }
+.date-cell { color:var(--text-secondary); }
+.actions { display:flex; align-items:center; gap:12px; }
+.actions a { color:var(--primary-text); text-decoration:none; }
+.delete-button { padding:0; border:0; background:none; color:#f87171; font-size:10px; cursor:pointer; }
+.delete-button:disabled { opacity:.5; }
+.empty { min-height:220px; padding:35px 20px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; color:var(--text-secondary); font-size:12px; }
+.empty-icon { margin-bottom:12px; color:var(--text-muted); font-size:30px; }
+.empty strong { color:var(--text); }
+.empty p { max-width:380px; line-height:1.7; font-size:10px; }
+.empty .primary-button { margin-top:10px; }
+.alert { margin:15px 21px; padding:12px; border:1px solid var(--danger-border); border-radius:7px; background:var(--danger-bg); color:var(--danger-text); font-size:11px; }
+.pagination { display:flex; align-items:center; justify-content:center; gap:20px; padding:16px; border-top:1px solid var(--border); color:var(--text-secondary); font-size:10px; }
+.pagination button { padding:8px 12px; border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-muted); color:var(--text-soft); cursor:pointer; }
+.pagination button:disabled { opacity:.35; cursor:not-allowed; }
+@media(max-width:900px) { .stats { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:600px) { .topbar { padding:18px; align-items:flex-start; flex-direction:column; } .content { padding:18px 12px; } .stats { gap:8px; } .stat { padding:13px; } .inventory-heading { padding:15px; } .toolbar { padding:12px; } }
+
+/* SERVERS HEADER HOME BUTTON */
+.servers-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.servers-home-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 9px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 700;
+}
+.servers-home-button:hover {
+  background: var(--border-subtle);
+  color: #fff;
+}
+:global(html[data-theme="light"]) .servers-home-button {
+  color: var(--border-strong);
+  background: #fff;
+  border-color: var(--text-soft);
+}
+:global(html[data-theme="light"]) .servers-home-button:hover {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: var(--primary-soft-text);
+}
+@media(max-width:600px) {
+  .servers-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+
+.server-name-locked { display: block; font-weight: 700; color: var(--text-muted); }
+.ip-lock-note { display: block; margin-top: 3px; font-size: 10px; font-weight: 700; color: var(--danger-text); }
+.locked-pill { display: inline-block; padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); }
+
+.masa-aktif-badge {
+  display: inline-block;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.masa-aktif-badge.permanent {
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--primary-text);
+}
+.masa-aktif-badge.timed {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.masa-aktif-badge.expired {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--warning-text);
+}
+.masa-aktif-badge.inactive,
+.masa-aktif-badge.unregistered {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+</style>
