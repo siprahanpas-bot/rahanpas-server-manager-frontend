@@ -19,25 +19,40 @@ const isFullscreen = ref(false)
 const netRates = ref<Record<number, { rxBps: number | null; txBps: number | null; prevRx: number; prevTx: number; prevTs: number }>>({})
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-function updateNetworkRate(serverId: number, rxBytes: number, txBytes: number) {
-  const now = Date.now()
+function updateNetworkRate(
+  serverId: number,
+  rxBytes: number,
+  txBytes: number,
+  collectedAt?: string | null
+) {
+  const parsedTs = collectedAt ? new Date(collectedAt).getTime() : NaN
+  const sampleTs = Number.isFinite(parsedTs) ? parsedTs : Date.now()
   const prev = netRates.value[serverId]
-  if (prev && now > prev.prevTs && rxBytes >= prev.prevRx && txBytes >= prev.prevTx) {
-    const dt = (now - prev.prevTs) / 1000
+
+  // Polling berulang atas snapshot yang sama tidak boleh mengubah throughput.
+  if (prev && sampleTs <= prev.prevTs) return
+
+  if (
+    prev &&
+    rxBytes >= prev.prevRx &&
+    txBytes >= prev.prevTx
+  ) {
+    const dt = (sampleTs - prev.prevTs) / 1000
+
     netRates.value[serverId] = {
-      rxBps: (rxBytes - prev.prevRx) / dt,
-      txBps: (txBytes - prev.prevTx) / dt,
+      rxBps: dt > 0 ? (rxBytes - prev.prevRx) / dt : prev.rxBps,
+      txBps: dt > 0 ? (txBytes - prev.prevTx) / dt : prev.txBps,
       prevRx: rxBytes,
       prevTx: txBytes,
-      prevTs: now,
+      prevTs: sampleTs,
     }
   } else {
     netRates.value[serverId] = {
-      rxBps: prev?.rxBps ?? null,
-      txBps: prev?.txBps ?? null,
+      rxBps: null,
+      txBps: null,
       prevRx: rxBytes,
       prevTx: txBytes,
-      prevTs: now,
+      prevTs: sampleTs,
     }
   }
 }
@@ -54,7 +69,8 @@ async function loadServers() {
         updateNetworkRate(
           s.id,
           Number(s.latest_metric.network_rx_bytes || 0),
-          Number(s.latest_metric.network_tx_bytes || 0)
+          Number(s.latest_metric.network_tx_bytes || 0),
+          s.latest_metric.collected_at
         )
       }
     }
@@ -67,14 +83,35 @@ async function loadServers() {
 
 async function refreshRealtimeAll() {
   if (!hasPerm('server.view') || realtimeSyncing.value || !servers.value.length) return
+
   realtimeSyncing.value = true
+
   try {
     await Promise.allSettled(
       servers.value.map(async (srv: any) => {
         try {
           const res: any = await $fetch(`/manager-api/servers/${srv.id}/monitoring`)
-          const m = res?.metrics
-          if (!m) return
+          const serverStatus = res?.server_status || res?.data?.server_status || {}
+          const status = serverStatus.status
+
+          // Status mengikuti record backend, bukan keberhasilan polling browser.
+          if (['online', 'offline', 'error', 'unknown'].includes(status)) {
+            srv.status = status
+          }
+
+          if (serverStatus.last_checked_at !== undefined) {
+            srv.last_checked_at = serverStatus.last_checked_at
+          }
+
+          if (serverStatus.last_error !== undefined) {
+            srv.last_error = serverStatus.last_error || null
+          }
+
+          const m = res?.metrics ?? res?.data?.metrics
+
+          // Tidak ada snapshot baru: pertahankan metrik terakhir.
+          if (!m || typeof m !== 'object') return
+
           const flat = {
             cpu_usage_percent: m.cpu?.usage_percent ?? 0,
             memory_usage_percent: m.memory?.usage_percent ?? 0,
@@ -85,13 +122,19 @@ async function refreshRealtimeAll() {
             disk_total_gb: m.disk?.total_gb ?? 0,
             network_rx_bytes: m.network?.rx_bytes ?? 0,
             network_tx_bytes: m.network?.tx_bytes ?? 0,
-            collected_at: m.collected_at || new Date().toISOString(),
+            collected_at: m.collected_at || null,
           }
+
           srv.latest_metric = flat
-          srv.status = 'online'
-          updateNetworkRate(srv.id, Number(flat.network_rx_bytes), Number(flat.network_tx_bytes))
+
+          updateNetworkRate(
+            srv.id,
+            Number(flat.network_rx_bytes),
+            Number(flat.network_tx_bytes),
+            flat.collected_at
+          )
         } catch {
-          // Biarkan status terakhir tetap tampil jika 1 server gagal
+          // Gangguan saat membaca API tidak mengubah status server.
         }
       })
     )

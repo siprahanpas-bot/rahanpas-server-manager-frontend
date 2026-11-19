@@ -10,6 +10,9 @@ const successMsg = ref('')
 
 const modalOpen = ref(false)
 const saving = ref(false)
+const resendingVerification = ref(false)
+const resendMessage = ref('')
+const resendError = ref('')
 const editingId = ref<number | null>(null)
 const form = reactive({
   name: '',
@@ -59,6 +62,8 @@ function openCreate() {
 
 function openEdit(u: any) {
   editingId.value = u.id
+  resendMessage.value = ''
+  resendError.value = ''
   Object.assign(form, {
     name: u.name,
     email: u.email,
@@ -88,6 +93,36 @@ async function saveUser() {
     errorMsg.value = e.data?.message || e.statusMessage || 'Gagal menyimpan user.'
   } finally {
     saving.value = false
+  }
+}
+
+async function resendVerification() {
+  if (
+    !editingId.value ||
+    form.account_status !== 'pending_verification' ||
+    !form.email ||
+    resendingVerification.value
+  ) return
+
+  resendingVerification.value = true
+  resendMessage.value = ''
+  resendError.value = ''
+
+  try {
+    const res: any = await $fetch('/auth/resend-verification', {
+      method: 'POST',
+      body: { email: form.email }
+    })
+
+    resendMessage.value = res.message ||
+      'Permintaan diproses. Periksa email akun tersebut.'
+  } catch (e: any) {
+    resendError.value =
+      e.data?.message ||
+      e.statusMessage ||
+      'Gagal memproses pengiriman ulang email verifikasi.'
+  } finally {
+    resendingVerification.value = false
   }
 }
 
@@ -211,6 +246,28 @@ async function deleteUser(u: any) {
                 <option value="pending_verification">Pending Verification</option>
               </select>
             </label>
+
+            <div
+              v-if="editingId && form.account_status === 'pending_verification'"
+              class="adm-field full"
+            >
+              <span>Email Verifikasi</span>
+              <button
+                type="button"
+                class="adm-btn"
+                :disabled="resendingVerification || saving"
+                @click="resendVerification"
+              >
+                {{ resendingVerification ? 'Memproses...' : 'Kirim Ulang Email Verifikasi' }}
+              </button>
+              <small v-if="resendMessage" class="adm-resend-success">
+                {{ resendMessage }}
+              </small>
+              <small v-if="resendError" class="adm-resend-error">
+                {{ resendError }}
+              </small>
+            </div>
+
             <label class="adm-field full">
               <span>{{ editingId ? 'Password Baru (kosongkan jika tidak diubah)' : 'Password (min 8 karakter)' }}</span>
               <input v-model="form.password" type="password" class="adm-input" :required="!editingId" minlength="8">
@@ -356,6 +413,8 @@ async function deleteUser(u: any) {
 .adm-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
 .adm-field.full { grid-column: 1 / -1; }
 .adm-field > span { font-weight: 600; color: var(--text-soft); }
+.adm-resend-success { color: var(--success-text); line-height: 1.5; }
+.adm-resend-error { color: var(--danger-text); line-height: 1.5; }
 .adm-check-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 8px; max-height: 200px; overflow-y: auto;

@@ -128,7 +128,12 @@ async function login() {
             <button type="submit" class="auth-submit" :disabled="loading">
               {{ loading ? 'Memverifikasi...' : 'Sign In ke Dashboard →' }}
             </button>
-          </form>
+                  <div class="flex justify-end my-3">
+          <NuxtLink to="/forgot-password" class="text-sm text-primary hover:underline dark:text-blue-400 font-medium">
+            Lupa password?
+          </NuxtLink>
+        </div>
+      </form>
 
           <div class="auth-card-foot">
             <span>Belum punya akun?</span>

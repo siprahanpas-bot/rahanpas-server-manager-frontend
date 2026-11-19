@@ -12,6 +12,7 @@ services:
       NITRO_HOST: ${NITRO_HOST:-0.0.0.0}
       NITRO_PORT: ${NITRO_PORT:-3000}
       NUXT_API_INTERNAL_BASE: ${NUXT_API_INTERNAL_BASE:?NUXT_API_INTERNAL_BASE wajib diatur}
+      NUXT_PUBLIC_GOOGLE_OAUTH_ENABLED: ${NUXT_PUBLIC_GOOGLE_OAUTH_ENABLED:-false}
     networks:
       - rahanpas_net
 

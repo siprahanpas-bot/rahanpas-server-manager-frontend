@@ -73,6 +73,40 @@ const authLabel = computed(() =>
     : 'Username & Password'
 )
 
+function resolveStatusFromMonitoringFailure(err: any, messageText: string): 'offline' | 'error' {
+  const combined = `${messageText} ${err?.data?.message || ''} ${err?.data?.statusMessage || ''} ${err?.message || ''}`.toLowerCase()
+  const code = Number(err?.statusCode || err?.response?.status || 0)
+
+  const offlinePatterns = [
+    'timed out',
+    'timeout',
+    'failed to connect',
+    'could not connect',
+    'connection refused',
+    'econnrefused',
+    'etimedout',
+    'ehostunreach',
+    'enetunreach',
+    'no route to host',
+    'network is unreachable',
+    'host is down',
+    'unreachable',
+    'tidak dapat dijangkau',
+    'server mati',
+    'offline'
+  ]
+
+  if (offlinePatterns.some((pat) => combined.includes(pat))) {
+    return 'offline'
+  }
+
+  if (code === 502 || code === 503 || code === 504) {
+    return 'offline'
+  }
+
+  return 'error'
+}
+
 function statusClass(status: string) {
   return {
     online: 'status-online',
@@ -454,8 +488,104 @@ const rdpConnecting = ref(false)
 const rdpConnected = ref(false)
 const rdpError = ref('')
 const rdpDisplayRef = ref<HTMLElement | null>(null)
+const rdpOverlayRef = ref<HTMLElement | null>(null)
+const rdpFullscreen = ref(false)
+const rdpClipboardStatus = ref('')
+
+const resizeRdpDisplay = () => {
+  if (typeof window === 'undefined') return
+  const wrap = rdpDisplayRef.value
+  if (!wrap || !rdpClient) return
+
+  window.requestAnimationFrame(() => {
+    const currentWrap = rdpDisplayRef.value
+    if (!currentWrap || !rdpClient) return
+    const width = Math.max(320, Math.floor(currentWrap.clientWidth || window.innerWidth))
+    const height = Math.max(200, Math.floor(currentWrap.clientHeight || (window.innerHeight - 60)))
+
+    try {
+      const display = rdpClient.getDisplay?.()
+      const dispW = display?.getWidth?.() || 0
+      const dispH = display?.getHeight?.() || 0
+      if (display && typeof display.scale === 'function' && dispW > 0 && dispH > 0) {
+        const scale = Math.min(width / dispW, height / dispH)
+        display.scale(scale > 0 ? scale : 1)
+      }
+    } catch {}
+
+    try {
+      if (typeof rdpClient.sendSize === 'function') {
+        rdpClient.sendSize(width, height)
+      }
+    } catch {}
+  })
+}
+
+const syncRdpFullscreen = () => {
+  if (typeof document === 'undefined') return
+  const activeFsEl = document.fullscreenElement || (document as any).webkitFullscreenElement
+  if (activeFsEl && rdpOverlayRef.value && activeFsEl === rdpOverlayRef.value) {
+    rdpFullscreen.value = true
+    resizeRdpDisplay()
+  } else if (!activeFsEl && rdpFullscreen.value) {
+    rdpFullscreen.value = false
+    resizeRdpDisplay()
+  }
+}
+
+const toggleRdpFullscreen = async () => {
+  if (typeof document === 'undefined') return
+  const el = rdpOverlayRef.value as any
+  const activeFsEl = document.fullscreenElement || (document as any).webkitFullscreenElement
+
+  if (activeFsEl) {
+    try {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen()
+      } else if ((document as any).webkitExitFullscreen) {
+        await (document as any).webkitExitFullscreen()
+      }
+    } catch {}
+    rdpFullscreen.value = false
+    return
+  }
+
+  if (!rdpFullscreen.value && el) {
+    try {
+      if (el.requestFullscreen) {
+        await el.requestFullscreen()
+        rdpFullscreen.value = true
+        return
+      } else if (el.webkitRequestFullscreen) {
+        await el.webkitRequestFullscreen()
+        rdpFullscreen.value = true
+        return
+      }
+    } catch {}
+  }
+
+  rdpFullscreen.value = !rdpFullscreen.value
+  resizeRdpDisplay()
+}
+
+const exitRdpFullscreenIfActive = async () => {
+  if (typeof document === 'undefined') return
+  const activeFsEl = document.fullscreenElement || (document as any).webkitFullscreenElement
+  if (activeFsEl) {
+    try {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen()
+      } else if ((document as any).webkitExitFullscreen) {
+        await (document as any).webkitExitFullscreen()
+      }
+    } catch {}
+  }
+  rdpFullscreen.value = false
+}
 let rdpClient: any = null
+let rdpGuacamole: any = null
 let rdpKeyboard: any = null
+let rdpClipboardKeyHandler: ((event: KeyboardEvent) => void) | null = null
 
 async function openRdpSession() {
   if (!server.value || server.value.os_type !== 'windows') return
@@ -476,12 +606,46 @@ async function openRdpSession() {
 
     const mod: any = await import('guacamole-common-js')
     const Guacamole = mod.default || mod
+    rdpGuacamole = Guacamole
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${proto}//${window.location.hostname}:${res.ws_port || 13002}/`
+    const wsUrl = `${proto}//${window.location.host}/rdp-ws/`
 
     const tunnel = new Guacamole.WebSocketTunnel(wsUrl)
     const client = new Guacamole.Client(tunnel)
     rdpClient = client
+
+    // Clipboard Windows -> clipboard lokal secara otomatis.
+    client.onclipboard = (stream: any, mimetype: string) => {
+      if (!mimetype || !mimetype.toLowerCase().startsWith('text/plain')) return
+
+      let clipboardText = ''
+      const reader = new Guacamole.StringReader(stream)
+
+      reader.ontext = (text: string) => {
+        clipboardText += text
+      }
+
+      reader.onend = () => {
+        if (!clipboardText) {
+          rdpClipboardStatus.value = ''
+          return
+        }
+
+        if (!navigator.clipboard?.writeText) {
+          rdpClipboardStatus.value = 'Clipboard API tidak tersedia pada browser.'
+          return
+        }
+
+        void navigator.clipboard.writeText(clipboardText)
+          .then(() => {
+            rdpClipboardStatus.value = ''
+          })
+          .catch((err: any) => {
+            rdpClipboardStatus.value =
+              err?.message || 'Browser menolak akses clipboard. Periksa izin Clipboard situs ini.'
+          })
+      }
+    }
 
     const display = client.getDisplay()
     const displayEl = display.getElement()
@@ -502,6 +666,12 @@ async function openRdpSession() {
       updateRdpScale()
     }
 
+    try {
+      const disp = client.getDisplay?.()
+      if (disp && typeof disp.showCursor === 'function') {
+        disp.showCursor(false)
+      }
+    } catch {}
     const container = rdpDisplayRef.value
     if (container) {
       container.innerHTML = ''
@@ -534,6 +704,45 @@ async function openRdpSession() {
     keyboard.onkeydown = (keysym: number) => client.sendKeyEvent(1, keysym)
     keyboard.onkeyup = (keysym: number) => client.sendKeyEvent(0, keysym)
 
+    // Clipboard lokal -> Windows ketika pengguna menekan Ctrl+V / Cmd+V.
+    const clipboardKeyHandler = (event: KeyboardEvent) => {
+      if (
+        !rdpConnected.value ||
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== 'v'
+      ) return
+
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.isContentEditable ||
+          ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      ) return
+
+      // Mencegah Ctrl+V dikirim sebagai shortcut biasa ke Windows.
+      event.preventDefault()
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+
+      // readText dipanggil langsung dalam event keyboard agar memenuhi
+      // persyaratan user activation browser.
+      void navigator.clipboard.readText()
+        .then((text: string) => {
+          if (!text) {
+            rdpClipboardStatus.value = ''
+            return
+          }
+          sendRdpClipboardText(text)
+        })
+        .catch((err: any) => {
+          rdpClipboardStatus.value =
+            err?.message || 'Browser menolak membaca clipboard. Periksa izin Clipboard situs ini.'
+        })
+    }
+
+    rdpClipboardKeyHandler = clipboardKeyHandler
+    window.addEventListener('keydown', clipboardKeyHandler, true)
+
     client.connect(`token=${encodeURIComponent(res.token)}`)
   } catch (err: any) {
     rdpError.value = err?.data?.message || err?.message || 'Gagal memulai sesi Remote Desktop.'
@@ -541,34 +750,100 @@ async function openRdpSession() {
   }
 }
 
+function sendRdpClipboardText(text: string) {
+  if (!rdpClient || !rdpConnected.value) {
+    rdpClipboardStatus.value = 'Koneksi RDP belum aktif.'
+    return
+  }
+
+  try {
+    const stream = rdpClient.createClipboardStream('text/plain')
+    if (!rdpGuacamole?.StringWriter) {
+      throw new Error('Guacamole StringWriter tidak tersedia.')
+    }
+
+    const writer = new rdpGuacamole.StringWriter(stream)
+    writer.sendText(text)
+    writer.sendEnd()
+
+    // Beri waktu Windows memproses clipboard sebelum menjalankan Paste.
+    // Ctrl_L = 0xFFE3, V = 0x0076.
+    window.setTimeout(() => {
+      if (!rdpClient || !rdpConnected.value) return
+
+      rdpClient.sendKeyEvent(1, 0xFFE3)
+      rdpClient.sendKeyEvent(1, 0x0076)
+      rdpClient.sendKeyEvent(0, 0x0076)
+      rdpClient.sendKeyEvent(0, 0xFFE3)
+    }, 250)
+
+    rdpClipboardStatus.value = ''
+  } catch (err: any) {
+    rdpClipboardStatus.value =
+      err?.message || 'Gagal mengirim clipboard ke Windows.'
+  }
+}
+
 function closeRdpSession() {
+  if (rdpClipboardKeyHandler) {
+    window.removeEventListener('keydown', rdpClipboardKeyHandler, true)
+    rdpClipboardKeyHandler = null
+  }
+
   if (rdpKeyboard) {
     rdpKeyboard.onkeydown = null
     rdpKeyboard.onkeyup = null
     rdpKeyboard = null
   }
   if (rdpClient) {
-    try { rdpClient.disconnect() } catch {}
+    try {
+      rdpClient.onclipboard = null
+      rdpClient.disconnect()
+    } catch {}
     rdpClient = null
   }
+  rdpGuacamole = null
+  rdpClipboardStatus.value = ''
   if (rdpDisplayRef.value) {
     rdpDisplayRef.value.innerHTML = ''
   }
+  void exitRdpFullscreenIfActive()
   rdpOpen.value = false
   rdpConnecting.value = false
   rdpConnected.value = false
 }
 
+const monitoringData = ref<any>(null)
 const monitoringLoading = ref(false)
 const monitoringError = ref('')
 const monitoringMessage = ref('')
+
+const isServerOffline = computed(() => {
+  if (!server.value) return false
+  if (server.value.status === 'online') return false
+  if (server.value.status === 'offline') return true
+  const msg = String(monitoringError.value || server.value.last_error || '').toLowerCase()
+  return [
+    'timed out',
+    'timeout',
+    'failed to connect',
+    'could not connect',
+    'connection refused',
+    'econnrefused',
+    'etimedout',
+    'ehostunreach',
+    'enetunreach',
+    'unreachable',
+    'offline'
+  ].some((p) => msg.includes(p))
+})
 
 const monitoringSupported = computed(() =>
   (server.value?.os_type === 'linux' && server.value?.connection_protocol === 'ssh') ||
   (server.value?.os_type === 'windows' && server.value?.connection_protocol === 'winrm')
 )
 
-async function loadMonitoring() {
+async function loadMonitoring(options: { force?: boolean } = {}) {
   if (!server.value || !monitoringSupported.value || monitoringLoading.value) {
     return
   }
@@ -578,34 +853,85 @@ async function loadMonitoring() {
   monitoringMessage.value = ''
 
   try {
-    const result: any = await $fetch(
-      `/manager-api/servers/${serverId}/monitoring`
-    )
+    const serverId = route.params.id || server.value.id
+    const result: any = await $fetch(`/manager-api/servers/${serverId}/monitoring`)
+    const payload = result?.data !== undefined ? result.data : result
+    const serverStatus = result?.server_status || payload?.server_status || {}
+    const backendStatus = serverStatus.status
 
-    metrics.value = result.metrics
+    if (
+      result?.success === false ||
+      result?.ok === false ||
+      (typeof result?.error === 'string' && result.error.trim())
+    ) {
+      const errMsg =
+        (typeof result?.error === 'string' && result.error.trim()) ||
+        result?.message ||
+        result?.statusMessage ||
+        'Gagal membaca snapshot monitoring.'
 
-    server.value.status = result.server_status?.status || 'online'
-    server.value.last_checked_at =
-      result.server_status?.last_checked_at || new Date().toISOString()
-    server.value.last_error = null
+      throw new Error(errMsg)
+    }
 
-    monitoringMessage.value = result.message || 'Monitoring berhasil diperbarui.'
+    if (payload && typeof payload === 'object') {
+      monitoringData.value = payload
+    }
+
+    const rawMetrics =
+      result?.metrics ??
+      payload?.metrics ??
+      (payload && (payload.cpu || payload.memory || payload.disk) ? payload : null)
+
+    // Jangan menghapus snapshot terakhir jika snapshot baru belum tersedia.
+    if (rawMetrics && typeof rawMetrics === 'object') {
+      metrics.value = {
+        ...rawMetrics,
+        load_average: Array.isArray(rawMetrics.load_average)
+          ? rawMetrics.load_average
+          : [],
+        swap: rawMetrics.swap || {
+          total_mb: 0,
+          used_mb: 0,
+          usage_percent: 0
+        }
+      }
+    }
+
+    // Status hanya berasal dari record server yang dikembalikan backend.
+    if (server.value) {
+      if (['online', 'offline', 'error', 'unknown'].includes(backendStatus)) {
+        server.value.status = backendStatus
+      }
+
+      if (serverStatus.last_error !== undefined) {
+        server.value.last_error = serverStatus.last_error || ''
+      }
+
+      if (serverStatus.last_checked_at !== undefined) {
+        server.value.last_checked_at = serverStatus.last_checked_at
+      }
+    }
+
+    monitoringMessage.value =
+      result?.message ||
+      (rawMetrics
+        ? 'Snapshot monitoring berhasil diperbarui.'
+        : 'Belum tersedia snapshot monitoring untuk server ini.')
   } catch (error: any) {
-    if (error.statusCode === 401) {
-      await navigateTo('/')
+    if (error?.statusCode === 401) {
+      await navigateTo('/login')
       return
     }
 
     monitoringError.value =
-      error.data?.statusMessage ||
-      error.data?.message ||
-      'Gagal mengambil data monitoring.'
+      error?.data?.statusMessage ||
+      error?.data?.message ||
+      error?.statusMessage ||
+      error?.message ||
+      'Gagal membaca snapshot monitoring.'
 
-    if (server.value) {
-      server.value.status = 'error'
-      server.value.last_error = monitoringError.value
-      server.value.last_checked_at = new Date().toISOString()
-    }
+    // Kegagalan membaca API bukan bukti server remote offline.
+    // Jangan mengubah status atau last_checked_at dari browser.
   } finally {
     monitoringLoading.value = false
   }
@@ -671,6 +997,8 @@ async function loadHistory() {
   historyError.value = ''
 
   try {
+    const serverId = route.params.id || server.value.id
+
     const result: any = await $fetch(
       `/manager-api/servers/${serverId}/monitoring/history?period=${historyPeriod.value}`
     )
@@ -714,14 +1042,27 @@ function historyPolyline(metric: string) {
     .join(' ')
 }
 
+function resolveHistoryNetBytes(point: any, metric: string): number {
+  if (!point || typeof point !== 'object') return 0
+  if (point[metric] !== undefined && point[metric] !== null) return Number(point[metric]) || 0
+  if (metric === 'network_rx_bytes') {
+    return Number(point.rx_bytes ?? point.net_rx_bytes ?? point.network?.rx_bytes ?? 0) || 0
+  }
+  if (metric === 'network_tx_bytes') {
+    return Number(point.tx_bytes ?? point.net_tx_bytes ?? point.network?.tx_bytes ?? 0) || 0
+  }
+  return 0
+}
+
 function historyNetworkRate(index: number, metric: string): number {
-  if (index <= 0) return 0
+  if (index <= 0 || !Array.isArray(historyPoints.value)) return 0
 
   const current = historyPoints.value[index]
   const previous = historyPoints.value[index - 1]
+  if (!current || !previous) return 0
 
-  const currentBytes = Number(current[metric])
-  const previousBytes = Number(previous[metric])
+  const currentBytes = resolveHistoryNetBytes(current, metric)
+  const previousBytes = resolveHistoryNetBytes(previous, metric)
 
   const elapsedSeconds =
     (new Date(current.collected_at).getTime() -
@@ -1007,6 +1348,10 @@ async function loadRemoteFiles(path?: string) {
 
 async function loadStorageDevices() {
   if (!fileManagerSupported.value || storageLoading.value) return
+  if (server.value?.status === 'offline') {
+    storageError.value = ''
+    return
+  }
 
   storageLoading.value = true
   storageError.value = ''
@@ -1546,7 +1891,6 @@ function storageDeviceDescription(device: any) {
 
 let historyInterval: ReturnType<typeof setInterval> | null = null
 
-let monitoringInterval: ReturnType<typeof setInterval> | null = null
 
 onMounted(async () => {
   await loadServer()
@@ -1561,11 +1905,6 @@ onMounted(async () => {
     await loadMonitoring()
     await loadHistory()
 
-    // Live metrics diperbarui setiap 10 detik.
-    monitoringInterval = setInterval(() => {
-      void loadMonitoring()
-    }, 10_000)
-
     // Histori diperbarui setiap 60 detik.
     historyInterval = setInterval(() => {
       void loadHistory()
@@ -1575,10 +1914,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   // Hentikan timer ketika pengguna meninggalkan halaman.
-  if (monitoringInterval !== null) {
-    clearInterval(monitoringInterval)
-    monitoringInterval = null
-  }
 
   if (historyInterval !== null) {
     clearInterval(historyInterval)
@@ -1587,6 +1922,7 @@ onUnmounted(() => {
 })
 
 const liveIntervalSec = ref<number>(10)
+
 let liveTimer: ReturnType<typeof setInterval> | null = null
 
 function stopLiveTimer() {
@@ -1619,15 +1955,29 @@ function metricLabel(value: number | string | undefined) {
   return 'Normal'
 }
 
-watch([liveIntervalSec, monitoringSupported], () => {
+watch([liveIntervalSec, monitoringSupported, () => server.value?.status], () => {
   startLiveTimer()
 })
 
 onMounted(() => {
+  if (typeof document !== 'undefined') {
+    document.addEventListener('fullscreenchange', syncRdpFullscreen)
+    document.addEventListener('webkitfullscreenchange', syncRdpFullscreen)
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', resizeRdpDisplay)
+  }
   startLiveTimer()
 })
 
 onBeforeUnmount(() => {
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('fullscreenchange', syncRdpFullscreen)
+    document.removeEventListener('webkitfullscreenchange', syncRdpFullscreen)
+  }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', resizeRdpDisplay)
+  }
   stopLiveTimer()
 })
 
@@ -2110,7 +2460,10 @@ onMounted(async () => {
               </button>
             </div>
 
-            <div v-if="storageError" class="fm-error" role="alert">
+            <div v-if="isServerOffline" class="fm-offline-note" role="status">
+              Server sedang <strong>Offline</strong> — informasi storage &amp; koneksi WinRM/SSH dijeda sementara hingga server kembali online.
+            </div>
+            <div v-else-if="storageError" class="fm-error" role="alert">
               {{ storageError }}
             </div>
             <div v-if="storageActionError" class="fm-error" role="alert">
@@ -3111,13 +3464,20 @@ onMounted(async () => {
               <div class="monitoring-title-row">
                 <h2>Live Server Monitoring</h2>
                 <span
-                  v-if="monitoringSupported"
-                  class="live-pill"
-                  :class="{ active: liveIntervalSec > 0 }"
-                >
-                  <i></i>
-                  {{ liveIntervalSec > 0 ? `LIVE · ${liveIntervalSec}s` : 'MANUAL' }}
-                </span>
+                v-if="monitoringSupported"
+                class="live-pill"
+                :class="{
+                  'is-offline-probe': liveIntervalSec > 0 && isServerOffline,
+                  'is-paused': liveIntervalSec === 0,
+                  'is-error-state': liveIntervalSec > 0 && !isServerOffline && server?.status === 'error'
+                }"
+              >
+                <span class="live-pulse" aria-hidden="true"></span>
+                <span v-if="liveIntervalSec === 0">PAUSED</span>
+                <span v-else-if="isServerOffline">OFFLINE · PROBE · {{ activeProbeIntervalSec }}s</span>
+                <span v-else-if="server?.status === 'error'">ERROR · {{ liveIntervalSec }}s</span>
+                <span v-else>LIVE · {{ liveIntervalSec }}s</span>
+              </span>
               </div>
               <p>
                 Penggunaan resource dan kondisi sistem server secara real-time.
@@ -3149,7 +3509,7 @@ onMounted(async () => {
                 type="button"
                 class="monitoring-refresh"
                 :disabled="monitoringLoading"
-                @click="loadMonitoring"
+                @click="loadMonitoring({ force: true })"
               >
                 <span :class="{ spinning: monitoringLoading }">↻</span>
                 {{ monitoringLoading ? 'Syncing...' : 'Refresh' }}
@@ -3163,7 +3523,7 @@ onMounted(async () => {
 
           <template v-else>
             <div v-if="monitoringLoading && !metrics" class="monitoring-placeholder">
-              Menghubungkan ke server dan mengambil metrik...
+              Membaca snapshot monitoring...
             </div>
 
             <div v-if="monitoringError" class="monitoring-error" role="alert">
@@ -3972,7 +4332,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div v-if="rdpOpen" class="rdp-overlay">
+    <div v-if="rdpOpen" ref="rdpOverlayRef" class="rdp-overlay" :class="{ 'is-fullscreen': rdpFullscreen }">
       <div class="rdp-bar">
         <div class="rdp-bar-info">
           <strong>🖥️ Remote Desktop · {{ server?.name }}</strong>
@@ -3980,9 +4340,17 @@ onMounted(async () => {
           <em v-if="rdpConnecting" class="rdp-badge is-wait">Menghubungkan...</em>
           <em v-else-if="rdpConnected" class="rdp-badge is-live">Connected</em>
         </div>
-        <button type="button" class="rdp-close-btn" @click="closeRdpSession">✕ Disconnect</button>
+        <div class="rdp-bar-actions">
+          <button type="button" class="rdp-fs-btn" @click="toggleRdpFullscreen">
+            {{ rdpFullscreen ? '⤓ Exit Fullscreen' : '⤢ Fullscreen' }}
+          </button>
+          <button type="button" class="rdp-close-btn" @click="closeRdpSession">✕ Disconnect</button>
+        </div>
       </div>
       <div v-if="rdpError" class="rdp-error">{{ rdpError }}</div>
+      <div v-if="rdpClipboardStatus" class="rdp-clipboard-status">
+        {{ rdpClipboardStatus }}
+      </div>
       <div ref="rdpDisplayRef" class="rdp-canvas-wrap"></div>
     </div>
 </template>
@@ -7814,6 +8182,19 @@ h1 { margin:0; font-size:22px; }
 .rdp-badge.is-live { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
 .rdp-close-btn { padding: 7px 14px; border-radius: 8px; border: 1px solid #ef4444; background: rgba(239, 68, 68, 0.15); color: #fca5a5; font-size: 12px; font-weight: 700; cursor: pointer; }
 .rdp-close-btn:hover { background: #dc2626; color: #ffffff; }
+.rdp-bar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rdp-fs-btn { padding: 7px 13px; border-radius: 8px; border: 1px solid #38bdf8; background: rgba(2, 132, 199, 0.16); color: #7dd3fc; font-size: 12px; font-weight: 700; cursor: pointer; }
+.rdp-fs-btn:hover { background: #0284c7; color: #ffffff; }
+.rdp-clip-btn { padding: 7px 13px; border-radius: 8px; border: 1px solid #64748b; background: rgba(100, 116, 139, 0.16); color: #e2e8f0; font-size: 12px; font-weight: 700; cursor: pointer; }
+.rdp-clip-btn:hover:not(:disabled) { background: #475569; }
+.rdp-clip-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.rdp-clipboard-status { padding: 7px 18px; background: #172554; color: #bfdbfe; font-size: 12px; border-bottom: 1px solid #1e40af; }
+.rdp-overlay.is-fullscreen,
+.rdp-overlay:fullscreen { width: 100vw; height: 100vh; max-width: none; max-height: none; border-radius: 0; }
+.rdp-canvas-wrap,
+.rdp-canvas-wrap * {
+  cursor: none !important;
+}
 .rdp-error { padding: 12px 18px; background: #450a0a; color: #fca5a5; font-size: 13px; border-bottom: 1px solid #991b1b; }
 .rdp-canvas-wrap { flex: 1; position: relative; width: 100%; height: 100%; overflow: auto; background: #020617; }
 .rdp-canvas-wrap :deep(canvas) { display: block; }
@@ -7829,4 +8210,96 @@ h1 { margin:0; font-size:22px; }
 .oo-error { padding: 12px 18px; background: #450a0a; color: #fca5a5; font-size: 13px; border-bottom: 1px solid #991b1b; }
 .oo-body { flex: 1; min-height: 0; width: 100%; height: 100%; background: #ffffff; }
 #onlyoffice-editor-container { width: 100%; height: 100%; }
+</style>
+
+<style scoped>
+
+.live-pill.is-offline-probe {
+  background: rgba(100, 116, 139, 0.16);
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.35);
+}
+.live-pill.is-offline-probe .live-pulse {
+  background: #94a3b8;
+  animation: none;
+  box-shadow: none;
+}
+.fm-offline-note {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  background: rgba(100, 116, 139, 0.14);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  margin-bottom: 10px;
+}
+:global(html[data-theme="light"]) .live-pill.is-offline-probe {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+:global(html[data-theme="light"]) .fm-offline-note {
+  background: #f8fafc;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+
+</style>
+
+<style scoped>
+
+.live-pill.is-paused {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.32);
+}
+.live-pill.is-paused .live-pulse {
+  background: #f59e0b;
+  animation: none;
+  box-shadow: none;
+}
+.monitoring-offline-banner {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+.mon-offline-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-bottom: 4px;
+}
+.mon-offline-sub {
+  font-size: 12.5px;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+:global(html[data-theme="light"]) .monitoring-offline-banner {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+:global(html[data-theme="light"]) .mon-offline-title {
+  color: #0f172a;
+}
+:global(html[data-theme="light"]) .mon-offline-sub {
+  color: #475569;
+}
+
+</style>
+
+<style scoped>
+
+.live-pill.is-error-state {
+  background: rgba(239, 68, 68, 0.14);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.live-pill.is-error-state .live-pulse {
+  background: #ef4444;
+  animation: none;
+  box-shadow: none;
+}
+
 </style>
